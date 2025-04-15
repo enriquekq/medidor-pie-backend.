@@ -8,7 +8,6 @@ import imutils
 
 app = FastAPI()
 
-# CORS para permitir desde cualquier origen (Shopify)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -25,6 +24,9 @@ def detectar_longitud_del_pie(imagen_np):
     contornos = imutils.grab_contours(contornos)
     contornos = sorted(contornos, key=cv2.contourArea, reverse=True)
 
+    if len(contornos) < 2:
+        return None, "No se detectaron suficientes contornos (hoja y pie)."
+
     hoja = None
     for c in contornos:
         perimetro = cv2.arcLength(c, True)
@@ -34,26 +36,28 @@ def detectar_longitud_del_pie(imagen_np):
             break
 
     if hoja is None:
-        return None
+        return None, "No se detectó una hoja A4 válida en la imagen."
 
     x, y, w, h = cv2.boundingRect(hoja)
     altura_px = max(w, h)
     escala_px_por_cm = altura_px / 29.7
 
-    if len(contornos) < 2:
-        return None
-
     pie_contorno = contornos[1]
     x, y, w, h = cv2.boundingRect(pie_contorno)
     largo_px = max(w, h)
     largo_cm = largo_px / escala_px_por_cm
-    return round(largo_cm, 1)
+    largo_cm = round(largo_cm, 1)
+
+    if largo_cm < 15 or largo_cm > 35:
+        return None, f"Largo fuera de rango: {largo_cm} cm. Asegúrate de usar una hoja A4 y una foto tomada desde arriba."
+
+    return largo_cm, None
 
 def convertir_a_talla(cm):
     tabla = {
         22: "22 MX", 23: "23 MX", 24: "24 MX",
         25: "25 MX", 26: "26 MX", 27: "27 MX",
-        28: "28 MX"
+        28: "28 MX", 29: "29 MX", 30: "30 MX"
     }
     redondeado = round(cm)
     return tabla.get(redondeado, f"{redondeado} MX")
@@ -64,9 +68,9 @@ async def medir(image: UploadFile = File(...)):
     img = Image.open(io.BytesIO(contents)).convert("RGB")
     imagen_np = np.array(img)
 
-    largo_cm = detectar_longitud_del_pie(imagen_np)
-    if not largo_cm:
-        return {"error": "No se pudo detectar el pie o la hoja correctamente."}
+    largo_cm, error = detectar_longitud_del_pie(imagen_np)
+    if error:
+        return {"error": error}
 
     talla = convertir_a_talla(largo_cm)
     return {"length_cm": largo_cm, "size": talla}
