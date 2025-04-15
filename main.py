@@ -15,8 +15,18 @@ app.add_middleware(
     allow_headers=["*"]
 )
 
-def detectar_longitud_del_pie(imagen_np):
-    gris = cv2.cvtColor(imagen_np, cv2.COLOR_RGB2GRAY)
+# Medidas oficiales de billetes mexicanos (en mm)
+BILLETES_MM = {
+    "20": (120, 65),
+    "50": (127, 66),
+    "100": (134, 66),
+    "200": (139, 66),
+    "500": (146, 66),
+    "1000": (153, 66)
+}
+
+def identificar_billete(img_np):
+    gris = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
     borrosa = cv2.GaussianBlur(gris, (5, 5), 0)
     bordes = cv2.Canny(borrosa, 50, 150)
 
@@ -24,34 +34,46 @@ def detectar_longitud_del_pie(imagen_np):
     contornos = imutils.grab_contours(contornos)
     contornos = sorted(contornos, key=cv2.contourArea, reverse=True)
 
-    if len(contornos) < 2:
-        return None, "No se detectaron suficientes contornos (hoja y pie)."
-
-    hoja = None
     for c in contornos:
-        perimetro = cv2.arcLength(c, True)
-        approx = cv2.approxPolyDP(c, 0.02 * perimetro, True)
+        approx = cv2.approxPolyDP(c, 0.02 * cv2.arcLength(c, True), True)
         if len(approx) == 4:
-            hoja = approx
-            break
+            x, y, w, h = cv2.boundingRect(approx)
+            largo_px = max(w, h)
+            alto_px = min(w, h)
+            for valor, (mm_largo, mm_alto) in BILLETES_MM.items():
+                ratio_real = mm_largo / mm_alto
+                ratio_img = largo_px / alto_px
+                if 0.9 * ratio_real <= ratio_img <= 1.1 * ratio_real:
+                    return valor, largo_px, mm_largo  # Valor del billete, pixeles, mm
+    return None, None, None
 
-    if hoja is None:
-        return None, "No se detectó una hoja A4 válida en la imagen."
+@app.post("/api/detectar_billete")
+async def detectar_billete(image: UploadFile = File(...)):
+    contents = await image.read()
+    img = Image.open(io.BytesIO(contents)).convert("RGB")
+    img_np = np.array(img)
 
-    x, y, w, h = cv2.boundingRect(hoja)
-    altura_px = max(w, h)
-    escala_px_por_cm = altura_px / 29.7
+    valor, px, mm = identificar_billete(img_np)
+    if not valor:
+        return {"error": "No se detectó ningún billete válido."}
+    return {"billete": f"${valor}", "pixeles": px, "mm": mm}
+
+def detectar_largo_pie(img_np, escala_px_mm):
+    gris = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
+    borrosa = cv2.GaussianBlur(gris, (5, 5), 0)
+    bordes = cv2.Canny(borrosa, 50, 150)
+    contornos = cv2.findContours(bordes.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contornos = imutils.grab_contours(contornos)
+    contornos = sorted(contornos, key=cv2.contourArea, reverse=True)
+
+    if len(contornos) < 2:
+        return None
 
     pie_contorno = contornos[1]
     x, y, w, h = cv2.boundingRect(pie_contorno)
     largo_px = max(w, h)
-    largo_cm = largo_px / escala_px_por_cm
-    largo_cm = round(largo_cm, 1)
-
-    if largo_cm < 15 or largo_cm > 35:
-        return None, f"Largo fuera de rango: {largo_cm} cm. Asegúrate de usar una hoja A4 y una foto tomada desde arriba."
-
-    return largo_cm, None
+    largo_mm = largo_px / escala_px_mm
+    return round(largo_mm / 10, 1)  # mm a cm
 
 def convertir_a_talla(cm):
     tabla = {
@@ -66,11 +88,16 @@ def convertir_a_talla(cm):
 async def medir(image: UploadFile = File(...)):
     contents = await image.read()
     img = Image.open(io.BytesIO(contents)).convert("RGB")
-    imagen_np = np.array(img)
+    img_np = np.array(img)
 
-    largo_cm, error = detectar_longitud_del_pie(imagen_np)
-    if error:
-        return {"error": error}
+    valor, largo_px, largo_mm = identificar_billete(img_np)
+    if not valor:
+        return {"error": "No se detectó un billete válido."}
+
+    escala_px_mm = largo_px / largo_mm
+    largo_cm = detectar_largo_pie(img_np, escala_px_mm)
+    if not largo_cm or largo_cm < 15 or largo_cm > 35:
+        return {"error": f"Largo fuera de rango: {largo_cm} cm. Verifica la imagen."}
 
     talla = convertir_a_talla(largo_cm)
-    return {"length_cm": largo_cm, "size": talla}
+    return {"length_cm": largo_cm, "size": talla, "referencia": f"${valor}"}
